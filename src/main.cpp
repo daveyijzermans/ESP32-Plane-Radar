@@ -8,6 +8,7 @@
 #include "config.h"
 #include "hardware/display.h"
 #include "services/adsb_client.h"
+#include "services/adsb_source.h"
 #include "services/radar_location.h"
 #include "services/wifi_setup.h"
 #include "ui/radar_display.h"
@@ -60,6 +61,23 @@ void fetchAndDrawAircraft() {
   handleBootButton();
 }
 
+#ifdef PROV_SSID
+/** Seed NVS from build flags so the setup portal can be skipped. */
+void provisionFromBuildFlags() {
+  Serial.println("provision: writing location, ADS-B URL and WiFi to NVS");
+  services::location::saveFromStrings(PROV_LAT, PROV_LON);
+  services::adsb_source::saveFromString(PROV_URL);
+  WiFi.persistent(true);
+  WiFi.mode(WIFI_STA);
+  WiFi.begin(PROV_SSID, PROV_PSK);
+  for (int i = 0; i < 100 && WiFi.status() != WL_CONNECTED; ++i) {
+    delay(200);
+  }
+  Serial.printf("provision: wifi %s\n",
+                WiFi.status() == WL_CONNECTED ? "saved and connected" : "NOT connected");
+}
+#endif
+
 }  // namespace
 
 void setup() {
@@ -74,8 +92,13 @@ void setup() {
     statusScreenPortal();
   }
   services::location::init();
+  services::adsb_source::init();
   ui::radar::rangeInit();
   services::adsb::setPollFn(wifiLoop);
+
+#ifdef PROV_SSID
+  provisionFromBuildFlags();
+#endif
 
   if (wifiSetupConnect()) {
     showRadarIfConnected();

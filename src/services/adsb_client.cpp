@@ -1,20 +1,24 @@
 #include "services/adsb_client.h"
 
 #include <HTTPClient.h>
+#include <WiFiClient.h>
 #include <WiFiClientSecure.h>
 
 #include <ArduinoJson.h>
 
+#include <cmath>
 #include <cstring>
 
 #include "config.h"
+#include "services/adsb_source.h"
 
 namespace services::adsb {
 
 namespace {
 
-constexpr char kApiBase[] = "https://opendata.adsb.fi/api/v3/lat/";
-constexpr float kKmPerNm = 1.852f;
+constexpr float kEarthRadiusKm = 6371.0f;
+/** Drop positions older than this; local feeds keep faded targets listed. */
+constexpr float kMaxPositionAgeSec = 60.0f;
 constexpr int kConnectAttemptMs = 200;
 constexpr unsigned long kRequestTimeoutMs = 10000;
 
@@ -85,7 +89,35 @@ bool readResponseBodyWithPoll(HTTPClient& http, String& payload) {
   return payload.length() > 0;
 }
 
-float kmToNauticalMiles(float km) { return km / kKmPerNm; }
+float greatCircleKm(double lat1, double lon1, double lat2, double lon2) {
+  const double to_rad = PI / 180.0;
+  const double dlat = (lat2 - lat1) * to_rad;
+  const double dlon = (lon2 - lon1) * to_rad;
+  const double mid_lat = (lat1 + lat2) * 0.5 * to_rad;
+  const double x = dlon * cos(mid_lat);
+  return static_cast<float>(sqrt(dlat * dlat + x * x) * kEarthRadiusKm);
+}
+
+/** Keys kept while parsing, so a busy feed cannot exhaust RAM. */
+void buildParseFilter(JsonDocument& filter) {
+  JsonObject plane = filter["aircraft"].add<JsonObject>();
+  plane["lat"] = true;
+  plane["lon"] = true;
+  plane["track"] = true;
+  plane["true_heading"] = true;
+  plane["mag_heading"] = true;
+  plane["dir"] = true;
+  plane["gs"] = true;
+  plane["tas"] = true;
+  plane["ias"] = true;
+  plane["alt_baro"] = true;
+  plane["alt_geom"] = true;
+  plane["flight"] = true;
+  plane["hex"] = true;
+  plane["t"] = true;
+  plane["seen_pos"] = true;
+  filter["ac"] = filter["aircraft"];
+}
 
 bool readJsonFloat(const JsonObject& obj, const char* key, float* out) {
   if (obj[key].is<float>() || obj[key].is<double>() || obj[key].is<int>()) {
@@ -93,6 +125,14 @@ bool readJsonFloat(const JsonObject& obj, const char* key, float* out) {
     return true;
   }
   return false;
+}
+
+bool positionIsStale(const JsonObject& plane) {
+  float seen = 0.0f;
+  if (!readJsonFloat(plane, "seen_pos", &seen)) {
+    return false;
+  }
+  return seen > kMaxPositionAgeSec;
 }
 
 float pickNoseHeading(const JsonObject& plane) {
@@ -206,17 +246,20 @@ size_t aircraftCount() { return s_aircraft_count; }
 const Aircraft* aircraftList() { return s_aircraft; }
 
 bool fetchUpdate(double center_lat, double center_lon, float fetch_radius_km) {
-  const float dist_nm = kmToNauticalMiles(fetch_radius_km);
+  const char* url = services::adsb_source::url();
+  if (url[0] == '\0') {
+    s_aircraft_count = 0;
+    Serial.println("adsb: no source URL configured");
+    return false;
+  }
 
-  String url = kApiBase;
-  url += String(center_lat, 6);
-  url += "/lon/";
-  url += String(center_lon, 6);
-  url += "/dist/";
-  url += String(dist_nm, 1);
-
-  WiFiClientSecure client;
-  client.setInsecure();
+  const bool secure = strncmp(url, "https://", 8) == 0;
+  WiFiClient plain_client;
+  WiFiClientSecure tls_client;
+  if (secure) {
+    tls_client.setInsecure();
+  }
+  WiFiClient& client = secure ? static_cast<WiFiClient&>(tls_client) : plain_client;
 
   HTTPClient http;
   if (!http.begin(client, url)) {
@@ -241,16 +284,25 @@ bool fetchUpdate(double center_lat, double center_lon, float fetch_radius_km) {
   }
   http.end();
 
+  JsonDocument filter;
+  buildParseFilter(filter);
+
   JsonDocument doc;
-  const DeserializationError err = deserializeJson(doc, payload);
+  const DeserializationError err =
+      deserializeJson(doc, payload, DeserializationOption::Filter(filter));
   if (err) {
     Serial.printf("adsb: JSON parse error: %s\n", err.c_str());
     return false;
   }
 
-  JsonArray ac = doc["ac"].as<JsonArray>();
+  // "aircraft" is dump1090/readsb aircraft.json; "ac" is the adsb.fi/re-api shape.
+  JsonArray ac = doc["aircraft"].as<JsonArray>();
+  if (ac.isNull()) {
+    ac = doc["ac"].as<JsonArray>();
+  }
   if (ac.isNull()) {
     s_aircraft_count = 0;
+    Serial.println("adsb: no aircraft array in response");
     return true;
   }
 
@@ -263,6 +315,14 @@ bool fetchUpdate(double center_lat, double center_lon, float fetch_radius_km) {
       continue;
     }
     if (isOnGround(plane) && !config::kAdsbShowGroundAircraft) {
+      continue;
+    }
+    if (positionIsStale(plane)) {
+      continue;
+    }
+    // Local feeds are unfiltered: keep only what the radar can place.
+    if (greatCircleKm(center_lat, center_lon, plane["lat"].as<double>(),
+                      plane["lon"].as<double>()) > fetch_radius_km) {
       continue;
     }
 
