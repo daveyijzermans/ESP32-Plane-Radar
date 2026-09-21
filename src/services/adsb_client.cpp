@@ -26,6 +26,18 @@ Aircraft s_aircraft[kMaxAircraft];
 size_t s_aircraft_count = 0;
 PollFn s_poll_fn = nullptr;
 
+/** Failed polls tolerated before the list is dropped, so a dead feed goes
+ *  blank instead of leaving stale targets on screen. */
+constexpr unsigned kMaxFailedPolls = 3;
+unsigned s_failed_polls = 0;
+
+void noteFetchFailure() {
+  if (++s_failed_polls >= kMaxFailedPolls && s_aircraft_count > 0) {
+    s_aircraft_count = 0;
+    Serial.println("adsb: feed stale, clearing targets");
+  }
+}
+
 void pollNetwork() {
   if (s_poll_fn != nullptr) {
     s_poll_fn();
@@ -50,44 +62,44 @@ int performGetWithPoll(HTTPClient& http) {
   return HTTPC_ERROR_READ_TIMEOUT;
 }
 
-bool readResponseBodyWithPoll(HTTPClient& http, String& payload) {
-  WiFiClient* stream = http.getStreamPtr();
-  if (stream == nullptr) {
-    return false;
+/**
+ * Feeds the JSON parser straight from the socket, so a whole aircraft.json
+ * never has to fit in RAM, and keeps the portal alive while blocked on data.
+ */
+class PollingStreamReader {
+ public:
+  explicit PollingStreamReader(WiFiClient* stream)
+      : stream_(stream), deadline_(millis() + kRequestTimeoutMs) {}
+
+  int read() {
+    if (!waitForData()) {
+      return -1;
+    }
+    return stream_->read();
   }
 
-  const int content_length = http.getSize();
-  if (content_length > 0) {
-    payload.reserve(static_cast<unsigned>(content_length + 1));
+  size_t readBytes(char* buffer, size_t length) {
+    if (!waitForData()) {
+      return 0;
+    }
+    return stream_->readBytes(reinterpret_cast<uint8_t*>(buffer), length);
   }
 
-  uint8_t buffer[512];
-  const unsigned long deadline = millis() + kRequestTimeoutMs;
-  while (millis() < deadline) {
-    pollNetwork();
-    const int available = stream->available();
-    if (available > 0) {
-      const int to_read =
-          available > static_cast<int>(sizeof(buffer)) ? static_cast<int>(sizeof(buffer))
-                                                       : available;
-      const int read_bytes = stream->readBytes(buffer, to_read);
-      if (read_bytes > 0) {
-        payload.concat(reinterpret_cast<const char*>(buffer),
-                       static_cast<unsigned>(read_bytes));
+ private:
+  bool waitForData() {
+    while (stream_->available() <= 0) {
+      if (!stream_->connected() || millis() > deadline_) {
+        return false;
       }
+      pollNetwork();
+      delay(1);
     }
-    if (content_length > 0 &&
-        static_cast<int>(payload.length()) >= content_length) {
-      break;
-    }
-    if (!http.connected() && stream->available() <= 0) {
-      break;
-    }
-    delay(1);
+    return true;
   }
 
-  return payload.length() > 0;
-}
+  WiFiClient* stream_;
+  unsigned long deadline_;
+};
 
 float greatCircleKm(double lat1, double lon1, double lat2, double lon2) {
   const double to_rad = PI / 180.0;
@@ -252,6 +264,7 @@ bool fetchUpdate(double center_lat, double center_lon, float fetch_radius_km) {
     Serial.println("adsb: no source URL configured");
     return false;
   }
+  noteFetchFailure();  // cleared again once this poll succeeds
 
   const bool secure = strncmp(url, "https://", 8) == 0;
   WiFiClient plain_client;
@@ -276,24 +289,26 @@ bool fetchUpdate(double center_lat, double center_lon, float fetch_radius_km) {
     return false;
   }
 
-  String payload;
-  if (!readResponseBodyWithPoll(http, payload)) {
-    Serial.println("adsb: empty response");
+  WiFiClient* stream = http.getStreamPtr();
+  if (stream == nullptr) {
+    Serial.println("adsb: no response stream");
     http.end();
     return false;
   }
-  http.end();
 
   JsonDocument filter;
   buildParseFilter(filter);
 
   JsonDocument doc;
+  PollingStreamReader reader(stream);
   const DeserializationError err =
-      deserializeJson(doc, payload, DeserializationOption::Filter(filter));
+      deserializeJson(doc, reader, DeserializationOption::Filter(filter));
+  http.end();
   if (err) {
     Serial.printf("adsb: JSON parse error: %s\n", err.c_str());
     return false;
   }
+  s_failed_polls = 0;
 
   // "aircraft" is dump1090/readsb aircraft.json; "ac" is the adsb.fi/re-api shape.
   JsonArray ac = doc["aircraft"].as<JsonArray>();

@@ -502,6 +502,19 @@ void drawAircraft() {
     float dist_km = 0.0f;
     offsetKmFromCenter(planes[i].lat, planes[i].lon, &dx_km, &dy_km, &dist_km);
 
+#ifdef RADAR_DEBUG_PLACEMENT
+    {
+      const float brg =
+          fmodf(atan2f(dx_km, dy_km) / kDegToRad + 360.0f, 360.0f);
+      int px = 0;
+      int py = 0;
+      latLonToScreen(planes[i].lat, planes[i].lon, &px, &py);
+      Serial.printf("place: %-8s dist %5.1f km brg %3.0f dx %6.1f dy %6.1f -> x %3d y %3d %s\n",
+                    planes[i].callsign, dist_km, brg, dx_km, dy_km, px, py,
+                    isInsideOuterRingKm(dist_km) ? "ring" : "rim");
+    }
+#endif
+
     if (isInsideOuterRingKm(dist_km)) {
       int x = 0;
       int y = 0;
