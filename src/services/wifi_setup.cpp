@@ -81,7 +81,7 @@ WiFiManagerParameter s_param_lon("radar_lon", "Longitude (deg)", "0",
 constexpr int kSourceParamLen =
     static_cast<int>(services::adsb_source::kMaxUrlLen);
 WiFiManagerParameter s_param_source(
-    "adsb_url", "ADS-B aircraft.json URL (blank = no fetch)", "",
+    "adsb_url", "ADS-B aircraft.json URL, or mqtt://user:pass@host:port/topic (blank = no fetch)", "",
     kSourceParamLen, " type=\"url\" placeholder=\"http://host:8080/data/aircraft.json\"");
 
 char s_miles_checkbox_attrs[32] = "type=\"checkbox\"";

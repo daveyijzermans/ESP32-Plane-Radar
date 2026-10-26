@@ -10,8 +10,12 @@ constexpr size_t kMaxUrlLen = 127;
 /** Load the saved aircraft.json URL from NVS. Call once before WiFi setup. */
 void init();
 
-/** Configured source URL, or "" when none is set (then nothing is fetched). */
+/** Configured source URL, or "" when none is set (then nothing is fetched): http(s)://… aircraft.json, or
+ *  mqtt://[user[:pass]@]host[:port]/topic for a broker that pushes the list. */
 const char* url();
+
+/** Whether the configured source is mqtt://. */
+bool isMqtt();
 
 /** Parse a portal string, validate scheme/host, persist to NVS. */
 bool saveFromString(const char* url_str);

@@ -25,10 +25,14 @@ using PollFn = void (*)();
 void setPollFn(PollFn fn);
 
 /**
- * Fetch aircraft within fetch_radius_km of center_lat/lon from the URL in
- * services::adsb_source (dump1090/readsb aircraft.json, or an "ac"-shaped API).
+ * Fetch aircraft within fetch_radius_km of center_lat/lon from the source in
+ * services::adsb_source: an http(s) URL (dump1090/readsb aircraft.json, or an "ac"-shaped API), polled, or an
+ * mqtt:// source whose latest message (the same shape) is taken. True when there is a new list to draw.
  * Filtering by radius happens here: local feeds return everything they see.
  */
 bool fetchUpdate(double center_lat, double center_lon, float fetch_radius_km);
+
+/** Keep an mqtt:// source's connection and take its messages; call every loop. A no-op for http(s). */
+void loop();
 
 }  // namespace services::adsb

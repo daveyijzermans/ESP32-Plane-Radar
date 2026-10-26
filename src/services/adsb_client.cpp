@@ -5,6 +5,8 @@
 #include <WiFiClientSecure.h>
 
 #include <ArduinoJson.h>
+#include <PubSubClient.h>
+#include <WiFi.h>
 
 #include <cmath>
 #include <cstring>
@@ -251,11 +253,140 @@ void fillTagFields(Aircraft* ac, const JsonObject& plane) {
 
 }  // namespace
 
-void setPollFn(PollFn fn) { s_poll_fn = fn; }
+bool applyDoc(JsonDocument& doc, double center_lat, double center_lon, float fetch_radius_km);
+bool fetchHttp(const char* url, double center_lat, double center_lon, float fetch_radius_km);
 
-size_t aircraftCount() { return s_aircraft_count; }
+namespace {
 
-const Aircraft* aircraftList() { return s_aircraft; }
+// ---- MQTT source: mqtt://user:pass@host:port/topic, a retained list in aircraft.json's shape (adsb-mqtt's
+// adsb/<slug>/aircraft). The broker pushes; each message replaces the list, and a silent broker blanks it.
+constexpr unsigned long kMqttRetryMs = 5000;
+constexpr unsigned long kMqttStaleMs = 60000;
+constexpr uint16_t kMqttBufferBytes = 24576;  // a busy sky's list, at ~180 bytes an aircraft
+
+struct MqttSource {
+  char host[64];
+  char user[32];
+  char pass[48];
+  char topic[64];
+  uint16_t port;
+};
+
+WiFiClient s_mqtt_net;
+PubSubClient s_mqtt(s_mqtt_net);
+MqttSource s_mqtt_src;
+char s_mqtt_for[services::adsb_source::kMaxUrlLen + 1] = "";  // the source the client is set up for
+JsonDocument s_mqtt_doc;
+bool s_mqtt_fresh = false;
+unsigned long s_mqtt_last_ms = 0;
+unsigned long s_mqtt_attempt_ms = 0;
+
+bool copyPart(const char* from, const char* to, char* out, size_t out_len) {
+  const size_t n = static_cast<size_t>(to - from);
+  if (n >= out_len) {
+    return false;
+  }
+  memcpy(out, from, n);
+  out[n] = '\0';
+  return true;
+}
+
+/** mqtt://[user[:pass]@]host[:port]/topic */
+bool parseMqttUrl(const char* url, MqttSource* out) {
+  memset(out, 0, sizeof(*out));
+  out->port = 1883;
+  if (strncmp(url, "mqtt://", 7) != 0) {
+    return false;
+  }
+  const char* p = url + 7;
+  const char* slash = strchr(p, '/');
+  if (slash == nullptr || slash[1] == '\0') {
+    return false;
+  }
+  const char* at = nullptr;
+  for (const char* q = p; q < slash; ++q) {
+    if (*q == '@') {
+      at = q;
+    }
+  }
+  if (at != nullptr) {
+    const char* colon = static_cast<const char*>(memchr(p, ':', at - p));
+    if (!copyPart(p, colon ? colon : at, out->user, sizeof(out->user)) ||
+        (colon && !copyPart(colon + 1, at, out->pass, sizeof(out->pass)))) {
+      return false;
+    }
+    p = at + 1;
+  }
+  const char* colon = static_cast<const char*>(memchr(p, ':', slash - p));
+  if (!copyPart(p, colon ? colon : slash, out->host, sizeof(out->host)) || out->host[0] == '\0') {
+    return false;
+  }
+  if (colon) {
+    out->port = static_cast<uint16_t>(atoi(colon + 1));
+  }
+  return strlen(slash + 1) < sizeof(out->topic) && strcpy(out->topic, slash + 1) != nullptr && out->port != 0;
+}
+
+void onMqttMessage(char* topic, uint8_t* payload, unsigned int length) {
+  JsonDocument filter;
+  buildParseFilter(filter);
+  const DeserializationError err = deserializeJson(s_mqtt_doc, reinterpret_cast<const char*>(payload), length,
+                                                   DeserializationOption::Filter(filter));
+  if (err) {
+    Serial.printf("adsb: MQTT JSON parse error: %s (%u bytes)\n", err.c_str(), length);
+    return;
+  }
+  s_mqtt_fresh = true;
+  s_mqtt_last_ms = millis();
+}
+
+}  // namespace
+
+void loop() {
+  const char* url = services::adsb_source::url();
+  if (!services::adsb_source::isMqtt()) {
+    if (s_mqtt.connected()) {
+      s_mqtt.disconnect();
+    }
+    s_mqtt_for[0] = '\0';
+    return;
+  }
+  if (strcmp(url, s_mqtt_for) != 0) {  // a new or changed source
+    if (s_mqtt.connected()) {
+      s_mqtt.disconnect();
+    }
+    if (!parseMqttUrl(url, &s_mqtt_src)) {
+      return;
+    }
+    strcpy(s_mqtt_for, url);
+    s_mqtt.setServer(s_mqtt_src.host, s_mqtt_src.port);
+    s_mqtt.setCallback(onMqttMessage);
+    s_mqtt.setSocketTimeout(2);
+    if (!s_mqtt.setBufferSize(kMqttBufferBytes)) {
+      Serial.println("adsb: no memory for the MQTT buffer");
+    }
+  }
+  if (WiFi.status() != WL_CONNECTED) {
+    return;
+  }
+  if (!s_mqtt.connected()) {
+    if (s_mqtt_attempt_ms != 0 && millis() - s_mqtt_attempt_ms < kMqttRetryMs) {
+      return;
+    }
+    s_mqtt_attempt_ms = millis();
+    char client_id[32];
+    snprintf(client_id, sizeof(client_id), "plane-radar-%06llx", ESP.getEfuseMac() & 0xffffffULL);
+    const bool ok = s_mqtt_src.user[0] ? s_mqtt.connect(client_id, s_mqtt_src.user, s_mqtt_src.pass)
+                                       : s_mqtt.connect(client_id);
+    if (!ok) {
+      Serial.printf("adsb: MQTT connect to %s failed, state %d\n", s_mqtt_src.host, s_mqtt.state());
+      return;
+    }
+    s_mqtt.subscribe(s_mqtt_src.topic);
+    Serial.printf("adsb: MQTT subscribed to %s\n", s_mqtt_src.topic);
+  }
+  s_mqtt.loop();
+}
 
 bool fetchUpdate(double center_lat, double center_lon, float fetch_radius_km) {
   const char* url = services::adsb_source::url();
@@ -264,6 +395,29 @@ bool fetchUpdate(double center_lat, double center_lon, float fetch_radius_km) {
     Serial.println("adsb: no source URL configured");
     return false;
   }
+  if (!services::adsb_source::isMqtt()) {
+    return fetchHttp(url, center_lat, center_lon, fetch_radius_km);
+  }
+  loop();
+  if (s_mqtt_fresh) {
+    s_mqtt_fresh = false;
+    return applyDoc(s_mqtt_doc, center_lat, center_lon, fetch_radius_km);
+  }
+  if (s_aircraft_count > 0 && millis() - s_mqtt_last_ms > kMqttStaleMs) {
+    s_aircraft_count = 0;
+    Serial.println("adsb: MQTT list stale, clearing targets");
+    return true;
+  }
+  return false;
+}
+
+void setPollFn(PollFn fn) { s_poll_fn = fn; }
+
+size_t aircraftCount() { return s_aircraft_count; }
+
+const Aircraft* aircraftList() { return s_aircraft; }
+
+bool fetchHttp(const char* url, double center_lat, double center_lon, float fetch_radius_km) {
   noteFetchFailure();  // cleared again once this poll succeeds
 
   const bool secure = strncmp(url, "https://", 8) == 0;
@@ -310,7 +464,11 @@ bool fetchUpdate(double center_lat, double center_lon, float fetch_radius_km) {
   }
   s_failed_polls = 0;
 
-  // "aircraft" is dump1090/readsb aircraft.json; "ac" is the adsb.fi/re-api shape.
+  return applyDoc(doc, center_lat, center_lon, fetch_radius_km);
+}
+
+bool applyDoc(JsonDocument& doc, double center_lat, double center_lon, float fetch_radius_km) {
+  // "aircraft" is dump1090/readsb aircraft.json (and adsb-mqtt's list); "ac" is the adsb.fi/re-api shape.
   JsonArray ac = doc["aircraft"].as<JsonArray>();
   if (ac.isNull()) {
     ac = doc["ac"].as<JsonArray>();

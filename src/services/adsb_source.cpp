@@ -14,7 +14,7 @@ constexpr char kKeyUrl[] = "src_url";
 
 char s_url[kMaxUrlLen + 1] = "";
 
-/** Accept http:// or https:// followed by at least one host character. */
+/** Accept http://, https:// or mqtt:// followed by at least one host character. */
 bool validUrl(const char* url) {
   if (url == nullptr) {
     return false;
@@ -28,6 +28,8 @@ bool validUrl(const char* url) {
     host = url + 7;
   } else if (strncmp(url, "https://", 8) == 0) {
     host = url + 8;
+  } else if (strncmp(url, "mqtt://", 7) == 0) {
+    host = url + 7;
   } else {
     return false;
   }
@@ -68,6 +70,8 @@ void init() {
 }
 
 const char* url() { return s_url; }
+
+bool isMqtt() { return strncmp(s_url, "mqtt://", 7) == 0; }
 
 bool saveFromString(const char* url_str) {
   char buf[kMaxUrlLen + 1] = "";

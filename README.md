@@ -84,9 +84,10 @@ As range decreases (or aircraft approach), targets move inward; beyond-ring dots
 
 ### ADS-B
 
-- Source: `https://opendata.adsb.fi/api/v3/`
+- Source: the URL set in the setup portal (or the provision build's `PROV_URL`), one of
+  - `http(s)://…/aircraft.json` from a dump1090/readsb receiver (or an `ac`-shaped API), polled every `kAdsbFetchIntervalMs`
+  - `mqtt://user:pass@host:port/topic`, a broker topic holding the same shape (e.g. adsb-mqtt's `adsb/<slug>/aircraft`); each message replaces the list, and a minute without one blanks it
 - Fetch radius: `ui::radar::fetchRadiusKm()` — scales with the active preset to roughly the screen edge (so rim dots have data)
-- Poll interval: `kAdsbFetchIntervalMs` (5 s) in `config.h`
 - Ground aircraft hidden by default (`kAdsbShowGroundAircraft`)
 
 ## Configuration

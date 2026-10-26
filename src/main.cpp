@@ -130,6 +130,7 @@ void loop() {
     }
   } else {
     g_wifi_down_since = 0;
+    services::adsb::loop();
     if (!g_radar_visible) {
       showRadarIfConnected();
     } else if (millis() - g_last_adsb_fetch_ms >= config::kAdsbFetchIntervalMs) {
