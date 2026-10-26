@@ -99,7 +99,9 @@ void refreshPortalParamDefaults() {
   snprintf(lon_buf, sizeof(lon_buf), "%.6f", services::location::lon());
   s_param_lat.setValue(lat_buf, kCoordParamLen);
   s_param_lon.setValue(lon_buf, kCoordParamLen);
-  s_param_source.setValue(services::adsb_source::url(), kSourceParamLen);
+  char source_buf[services::adsb_source::kMaxUrlLen + 1];
+  services::adsb_source::displayUrl(source_buf, sizeof(source_buf));
+  s_param_source.setValue(source_buf, kSourceParamLen);
   snprintf(s_miles_checkbox_attrs, sizeof(s_miles_checkbox_attrs), "type=\"checkbox\"%s",
            ui::radar::useMiles() ? " checked" : "");
   s_param_miles.setValue("T", 2);

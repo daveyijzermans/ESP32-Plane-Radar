@@ -17,6 +17,11 @@ const char* url();
 /** Whether the configured source is mqtt://. */
 bool isMqtt();
 
+/** The source as the setup portal shows it: an mqtt:// password as kPasswordMask, since the portal has no login. */
+void displayUrl(char* out, size_t out_len);
+
+constexpr char kPasswordMask[] = "********";
+
 /** Parse a portal string, validate scheme/host, persist to NVS. */
 bool saveFromString(const char* url_str);
 
